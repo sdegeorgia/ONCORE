@@ -1,0 +1,101 @@
+# =============================================================================
+# envs/bioconductor.yaml - R/Bioconductor environment
+# =============================================================================
+name: bioconductor
+channels:
+  - conda-forge
+  - bioconda
+  - r
+dependencies:
+  - r-base=4.2
+  - r-devtools
+  - r-tidyverse
+  - r-data.table
+  - r-ggplot2
+  - r-pheatmap
+  - r-corrplot
+  - bioconductor-genomicranges
+  - bioconductor-rtracklayer
+  - bioconductor-chipseeker
+  - bioconductor-diffbind
+  - bioconductor-motifmatchr
+  - bioconductor-tfbstools
+  - bioconductor-jaspar2022
+  - bioconductor-bsgenome.hsapiens.ucsc.hg19
+  - bioconductor-bsgenome.hsapiens.ucsc.hg38
+  - bioconductor-biomart
+  - bioconductor-annotationdbi
+  - bioconductor-org.hs.eg.db
+  - bioconductor-tcgabiolinks
+  - bioconductor-maftools
+
+---
+# =============================================================================
+# envs/python.yaml - Python environment
+# =============================================================================
+name: python_analysis
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.9
+  - pandas
+  - numpy
+  - scipy
+  - matplotlib
+  - seaborn
+  - scikit-learn
+  - requests
+  - beautifulsoup4
+  - pybedtools
+  - pysam
+  - biopython
+  - pyBigWig
+  - plotly
+  - jupyter
+  - pip
+  - pip:
+    - pyDepMap
+    - mygene
+    - bioservices
+
+---
+# =============================================================================
+# envs/tools.yaml - Bioinformatics tools
+# =============================================================================
+name: biotools
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - macs2=2.2.7
+  - bedtools=2.30.0
+  - samtools=1.15
+  - ucsc-bedgraphtobigwig
+  - ucsc-bigwigtobedgraph
+  - ucsc-liftover
+  - deeptools
+  - homer
+  - meme
+  - wget
+  - curl
+
+---
+# =============================================================================
+# envs/r_report.yaml - R environment for report generation
+# =============================================================================
+name: r_report
+channels:
+  - conda-forge
+  - bioconda
+  - r
+dependencies:
+  - r-base=4.2
+  - r-rmarkdown
+  - r-knitr
+  - r-dt
+  - r-plotly
+  - r-htmlwidgets
+  - r-flexdashboard
+  - r-bookdown
+  - pandoc

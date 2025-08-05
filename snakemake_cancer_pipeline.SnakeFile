@@ -1,0 +1,377 @@
+# Snakemake workflow for Cancer Regulatory Elements Discovery Pipeline
+# Usage: snakemake --configfile config.yaml --cores 8
+
+import pandas as pd
+import os
+from pathlib import Path
+
+# Load configuration
+configfile: "config.yaml"
+
+# Define global variables
+CANCER_TYPE = config["cancer_type"]
+TARGET_GENE = config["target_gene"]
+GENOME_BUILD = config["genome_build"]
+ANALYSIS_WINDOW = config["analysis_window"]
+CELL_LINES = config["cell_lines"]
+CONSERVATION_THRESHOLD = config["conservation_threshold"]
+
+# Create output directories
+RESULTS_DIR = f"results/{CANCER_TYPE}_{TARGET_GENE}"
+DATA_DIR = "data"
+SCRIPTS_DIR = "scripts"
+
+# Define all final outputs
+rule all:
+    input:
+        # Stage 1: Data preparation
+        f"{RESULTS_DIR}/genomic_region.bed",
+        f"{RESULTS_DIR}/cell_lines_metadata.tsv",
+        
+        # Stage 2: ChIP-seq analysis
+        expand(f"{RESULTS_DIR}/chip_seq/{{cell_line}}_H3K27ac_peaks.bed", cell_line=CELL_LINES),
+        f"{RESULTS_DIR}/chip_seq/consensus_peaks.bed",
+        
+        # Stage 3: Conservation analysis
+        f"{RESULTS_DIR}/conservation/high_conservation_regions.bed",
+        f"{RESULTS_DIR}/conservation/conservation_scores.bigwig",
+        
+        # Stage 4: Motif analysis
+        f"{RESULTS_DIR}/motifs/tf_binding_sites.bed",
+        f"{RESULTS_DIR}/motifs/motif_enrichment.tsv",
+        
+        # Stage 5: Expression correlation
+        f"{RESULTS_DIR}/expression/correlation_analysis.tsv",
+        
+        # Stage 6: Clinical relevance
+        f"{RESULTS_DIR}/clinical/mutation_analysis.tsv",
+        f"{RESULTS_DIR}/clinical/therapeutic_targets.tsv",
+        
+        # Final report
+        f"{RESULTS_DIR}/final_report.html"
+
+# =============================================================================
+# STAGE 1: DATA PREPARATION
+# =============================================================================
+
+rule define_genomic_region:
+    """Define genomic region around target gene"""
+    output:
+        bed = f"{RESULTS_DIR}/genomic_region.bed",
+        granges = f"{RESULTS_DIR}/genomic_region.rds"
+    params:
+        gene = TARGET_GENE,
+        window = ANALYSIS_WINDOW,
+        genome = GENOME_BUILD
+    conda: "envs/bioconductor.yaml"
+    script: "scripts/01_define_genomic_region.R"
+
+rule prepare_cell_lines:
+    """Prepare cell line metadata and validate availability"""
+    input:
+        depmap_data = f"{DATA_DIR}/depmap/CERES_gene_effect.csv"
+    output:
+        metadata = f"{RESULTS_DIR}/cell_lines_metadata.tsv"
+    params:
+        cancer_type = CANCER_TYPE,
+        target_gene = TARGET_GENE,
+        cell_lines = CELL_LINES
+    conda: "envs/python.yaml"
+    script: "scripts/01_prepare_cell_lines.py"
+
+# =============================================================================
+# STAGE 2: CHIP-SEQ ANALYSIS
+# =============================================================================
+
+rule download_chip_seq:
+    """Download ChIP-seq data for each cell line"""
+    output:
+        h3k27ac = f"{DATA_DIR}/chip_seq/{{cell_line}}_H3K27ac.bam",
+        h3k4me1 = f"{DATA_DIR}/chip_seq/{{cell_line}}_H3K4me1.bam",
+        h3k4me3 = f"{DATA_DIR}/chip_seq/{{cell_line}}_H3K4me3.bam"
+    params:
+        cell_line = "{cell_line}",
+        encode_url = config["encode_base_url"]
+    conda: "envs/tools.yaml"
+    shell:
+        """
+        python scripts/02_download_chip_seq.py \
+            --cell-line {params.cell_line} \
+            --output-dir {DATA_DIR}/chip_seq \
+            --encode-url {params.encode_url}
+        """
+
+rule call_chip_peaks:
+    """Call peaks from ChIP-seq data"""
+    input:
+        bam = f"{DATA_DIR}/chip_seq/{{cell_line}}_{{mark}}.bam"
+    output:
+        peaks = f"{RESULTS_DIR}/chip_seq/{{cell_line}}_{{mark}}_peaks.bed",
+        summit = f"{RESULTS_DIR}/chip_seq/{{cell_line}}_{{mark}}_summits.bed"
+    params:
+        genome_size = config["genome_size"],
+        qvalue = config["peak_qvalue"]
+    conda: "envs/tools.yaml"
+    threads: 4
+    shell:
+        """
+        macs2 callpeak \
+            -t {input.bam} \
+            -f BAM \
+            -g {params.genome_size} \
+            -q {params.qvalue} \
+            --outdir $(dirname {output.peaks}) \
+            -n {wildcards.cell_line}_{wildcards.mark}
+        
+        # Convert to BED format
+        awk 'OFS="\\t" {{print $1, $2, $3, $4, $5}}' \
+            $(dirname {output.peaks})/{wildcards.cell_line}_{wildcards.mark}_peaks.narrowPeak \
+            > {output.peaks}
+        """
+
+rule intersect_with_region:
+    """Intersect peaks with target genomic region"""
+    input:
+        peaks = f"{RESULTS_DIR}/chip_seq/{{cell_line}}_{{mark}}_peaks.bed",
+        region = f"{RESULTS_DIR}/genomic_region.bed"
+    output:
+        intersected = f"{RESULTS_DIR}/chip_seq/{{cell_line}}_{{mark}}_peaks_in_region.bed"
+    conda: "envs/tools.yaml"
+    shell:
+        """
+        bedtools intersect -a {input.peaks} -b {input.region} -wa > {output.intersected}
+        """
+
+rule consensus_peaks:
+    """Identify consensus peaks across cell lines"""
+    input:
+        peaks = expand(f"{RESULTS_DIR}/chip_seq/{{cell_line}}_H3K27ac_peaks_in_region.bed", 
+                      cell_line=CELL_LINES)
+    output:
+        consensus = f"{RESULTS_DIR}/chip_seq/consensus_peaks.bed"
+    params:
+        min_overlap = config["consensus_min_overlap"]
+    conda: "envs/tools.yaml"
+    script: "scripts/02_consensus_peaks.py"
+
+# =============================================================================
+# STAGE 3: CONSERVATION ANALYSIS
+# =============================================================================
+
+rule download_conservation:
+    """Download PhastCons conservation scores"""
+    output:
+        phastcons = f"{DATA_DIR}/conservation/phastCons100way.bigWig"
+    params:
+        genome = GENOME_BUILD
+    conda: "envs/tools.yaml"
+    shell:
+        """
+        if [ "{params.genome}" == "hg19" ]; then
+            wget -O {output.phastcons} \
+                http://hgdownload.cse.ucsc.edu/goldenPath/hg19/phastCons100way/hg19.100way.phastCons.bw
+        else
+            wget -O {output.phastcons} \
+                http://hgdownload.cse.ucsc.edu/goldenPath/hg38/phastCons100way/hg38.phastCons100way.bw
+        fi
+        """
+
+rule extract_conservation_scores:
+    """Extract conservation scores for genomic region"""
+    input:
+        region = f"{RESULTS_DIR}/genomic_region.bed",
+        phastcons = f"{DATA_DIR}/conservation/phastCons100way.bigWig"
+    output:
+        scores = f"{RESULTS_DIR}/conservation/conservation_scores.bigwig",
+        bed = f"{RESULTS_DIR}/conservation/conservation_scores.bed"
+    conda: "envs/tools.yaml"
+    shell:
+        """
+        # Extract scores for region
+        bigWigToBedGraph {input.phastcons} {output.bed}.tmp
+        bedtools intersect -a {output.bed}.tmp -b {input.region} -wa > {output.bed}
+        rm {output.bed}.tmp
+        
+        # Create region-specific bigWig
+        bedGraphToBigWig {output.bed} \
+            data/genome/{GENOME_BUILD}.chrom.sizes \
+            {output.scores}
+        """
+
+rule identify_high_conservation:
+    """Identify highly conserved regions"""
+    input:
+        scores = f"{RESULTS_DIR}/conservation/conservation_scores.bed",
+        region = f"{RESULTS_DIR}/genomic_region.bed"
+    output:
+        high_cons = f"{RESULTS_DIR}/conservation/high_conservation_regions.bed",
+        tiles = f"{RESULTS_DIR}/conservation/conservation_tiles.bed"
+    params:
+        threshold = CONSERVATION_THRESHOLD,
+        tile_size = config["tile_size"]
+    conda: "envs/bioconductor.yaml"
+    script: "scripts/03_conservation_analysis.R"
+
+# =============================================================================
+# STAGE 4: TRANSCRIPTION FACTOR MOTIF ANALYSIS
+# =============================================================================
+
+rule identify_cancer_tfs:
+    """Identify cancer-specific transcription factors"""
+    output:
+        tf_list = f"{RESULTS_DIR}/motifs/cancer_specific_tfs.tsv"
+    params:
+        cancer_type = CANCER_TYPE,
+        target_gene = TARGET_GENE
+    conda: "envs/python.yaml"
+    script: "scripts/04_identify_cancer_tfs.py"
+
+rule download_motifs:
+    """Download TF motifs from JASPAR"""
+    input:
+        tf_list = f"{RESULTS_DIR}/motifs/cancer_specific_tfs.tsv"
+    output:
+        motifs = f"{RESULTS_DIR}/motifs/jaspar_motifs.rds"
+    conda: "envs/bioconductor.yaml"
+    script: "scripts/04_download_motifs.R"
+
+rule scan_motifs:
+    """Scan for TF binding sites in conserved regions"""
+    input:
+        regions = f"{RESULTS_DIR}/conservation/high_conservation_regions.bed",
+        motifs = f"{RESULTS_DIR}/motifs/jaspar_motifs.rds",
+        genome = f"data/genome/{GENOME_BUILD}.fa"
+    output:
+        binding_sites = f"{RESULTS_DIR}/motifs/tf_binding_sites.bed",
+        sequences = f"{RESULTS_DIR}/motifs/conserved_sequences.fa"
+    params:
+        score_threshold = config["motif_score_threshold"]
+    conda: "envs/bioconductor.yaml"
+    script: "scripts/04_motif_scanning.R"
+
+rule motif_enrichment:
+    """Perform motif enrichment analysis"""
+    input:
+        binding_sites = f"{RESULTS_DIR}/motifs/tf_binding_sites.bed",
+        background = f"{RESULTS_DIR}/genomic_region.bed"
+    output:
+        enrichment = f"{RESULTS_DIR}/motifs/motif_enrichment.tsv"
+    conda: "envs/bioconductor.yaml"
+    script: "scripts/04_motif_enrichment.R"
+
+# =============================================================================
+# STAGE 5: EXPRESSION ANALYSIS
+# =============================================================================
+
+rule download_expression_data:
+    """Download expression data from TCGA/GTEx"""
+    output:
+        tcga_expr = f"{DATA_DIR}/expression/tcga_{CANCER_TYPE.lower()}_expression.tsv",
+        gtex_expr = f"{DATA_DIR}/expression/gtex_expression.tsv"
+    params:
+        cancer_type = CANCER_TYPE
+    conda: "envs/python.yaml"
+    script: "scripts/05_download_expression.py"
+
+rule expression_correlation:
+    """Correlate enhancer activity with gene expression"""
+    input:
+        consensus_peaks = f"{RESULTS_DIR}/chip_seq/consensus_peaks.bed",
+        tcga_expr = f"{DATA_DIR}/expression/tcga_{CANCER_TYPE.lower()}_expression.tsv",
+        target_gene = TARGET_GENE
+    output:
+        correlation = f"{RESULTS_DIR}/expression/correlation_analysis.tsv"
+    conda: "envs/bioconductor.yaml"
+    script: "scripts/05_expression_correlation.R"
+
+# =============================================================================
+# STAGE 6: CLINICAL RELEVANCE
+# =============================================================================
+
+rule download_mutation_data:
+    """Download mutation data from COSMIC/TCGA"""
+    output:
+        cosmic = f"{DATA_DIR}/mutations/cosmic_{CANCER_TYPE.lower()}.vcf",
+        tcga = f"{DATA_DIR}/mutations/tcga_{CANCER_TYPE.lower()}.maf"
+    params:
+        cancer_type = CANCER_TYPE
+    conda: "envs/python.yaml"
+    script: "scripts/06_download_mutations.py"
+
+rule mutation_analysis:
+    """Analyze mutations in regulatory regions"""
+    input:
+        regions = f"{RESULTS_DIR}/conservation/high_conservation_regions.bed",
+        cosmic = f"{DATA_DIR}/mutations/cosmic_{CANCER_TYPE.lower()}.vcf",
+        tcga = f"{DATA_DIR}/mutations/tcga_{CANCER_TYPE.lower()}.maf"
+    output:
+        analysis = f"{RESULTS_DIR}/clinical/mutation_analysis.tsv"
+    conda: "envs/bioconductor.yaml"
+    script: "scripts/06_mutation_analysis.R"
+
+rule therapeutic_targets:
+    """Identify potential therapeutic targets"""
+    input:
+        tf_binding = f"{RESULTS_DIR}/motifs/tf_binding_sites.bed",
+        expression = f"{RESULTS_DIR}/expression/correlation_analysis.tsv",
+        mutations = f"{RESULTS_DIR}/clinical/mutation_analysis.tsv"
+    output:
+        targets = f"{RESULTS_DIR}/clinical/therapeutic_targets.tsv"
+    conda: "envs/python.yaml"
+    script: "scripts/06_therapeutic_targets.py"
+
+# =============================================================================
+# FINAL REPORT
+# =============================================================================
+
+rule generate_report:
+    """Generate final HTML report"""
+    input:
+        genomic_region = f"{RESULTS_DIR}/genomic_region.bed",
+        consensus_peaks = f"{RESULTS_DIR}/chip_seq/consensus_peaks.bed",
+        conservation = f"{RESULTS_DIR}/conservation/high_conservation_regions.bed",
+        motifs = f"{RESULTS_DIR}/motifs/tf_binding_sites.bed",
+        expression = f"{RESULTS_DIR}/expression/correlation_analysis.tsv",
+        mutations = f"{RESULTS_DIR}/clinical/mutation_analysis.tsv",
+        targets = f"{RESULTS_DIR}/clinical/therapeutic_targets.tsv"
+    output:
+        report = f"{RESULTS_DIR}/final_report.html"
+    params:
+        cancer_type = CANCER_TYPE,
+        target_gene = TARGET_GENE
+    conda: "envs/r_report.yaml"
+    script: "scripts/07_generate_report.Rmd"
+
+# =============================================================================
+# UTILITY RULES
+# =============================================================================
+
+rule clean:
+    """Clean intermediate files"""
+    shell:
+        """
+        rm -rf {DATA_DIR}/chip_seq/*.bam
+        rm -rf {DATA_DIR}/chip_seq/*.bai
+        find {RESULTS_DIR} -name "*.tmp" -delete
+        """
+
+rule clean_all:
+    """Clean all output files"""
+    shell:
+        """
+        rm -rf {RESULTS_DIR}
+        rm -rf {DATA_DIR}
+        """
+
+# =============================================================================
+# WORKFLOW VALIDATION
+# =============================================================================
+
+rule validate_inputs:
+    """Validate input parameters and files"""
+    output:
+        validation = f"{RESULTS_DIR}/validation_log.txt"
+    params:
+        config_file = "config.yaml"
+    conda: "envs/python.yaml"
+    script: "scripts/00_validate_inputs.py"
