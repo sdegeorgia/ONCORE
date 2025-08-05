@@ -1,9 +1,8 @@
 # ONCORE
-ONCOgenic Regulatory Element discovery
-# Generalized Cancer Bioinformatics Pipeline for Regulatory Element Discovery
+**ONCO**genic **R**egulatory **E**lement discovery
 
 ## Overview
-This pipeline adapts the SOX10 melanoma analysis workflow to identify regulatory elements and potential therapeutic targets across different cancer types. The approach combines chromatin accessibility, evolutionary conservation, and transcription factor binding analysis.
+ONCORE is a generalized cancer bioinformatics pipeline that adapts the enhancer analysis workflow from our recent study on SOX10 regulatory elements in melanoma (PMID: 38699319) to identify regulatory elements and potential therapeutic targets across diverse cancer types. The pipeline integrates chromatin accessibility, evolutionary conservation, and transcription factor binding data to systematically prioritize candidate noncoding regulatory elements relevant to oncogenic processes.
 
 ## Pipeline Architecture
 
